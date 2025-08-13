@@ -180,8 +180,8 @@ func main() {
     
     // Publish message
     publisher.Publish(context.Background(),
-        event.WithSubscribeOptionTopic(event.Topic("user-events")),
-        event.WithPayload(map[string]interface{}{
+        event.WithPublishTopic(event.Topic("user-events")),
+        event.WithPublishPayload(map[string]interface{}{
             "user_id": "123",
             "action":  "login",
         }),
@@ -295,11 +295,10 @@ event.WithSqsSubscriberTimeout(30*time.Second)
 
 ```go
 // Common publish options
-event.WithSubscribeOptionTopic(event.Topic("my-topic"))
-event.WithPayload(data)
+event.WithPublishTopic(event.Topic("my-topic"))
+event.WithPublishPayload(data)
 
 // SQS specific publish options
-event.WithPublisherSqsUseFifo(true)
 event.WithPublisherSqsGroupID("my-group")
 ```
 

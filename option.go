@@ -18,13 +18,18 @@ type PublishConfig struct {
 }
 
 type PublishConfigSqs struct {
-	UseFifo bool
 	GroupID string
 }
 
-func WithPublisherSqsUseFifo(useFifo bool) PublishOption {
+func WithPublishTopic(topic Topic) PublishOption {
 	return func(c *PublishConfig) {
-		c.Sqs.UseFifo = useFifo
+		c.Topic = topic
+	}
+}
+
+func WithPublishPayload(payload any) PublishOption {
+	return func(c *PublishConfig) {
+		c.Payload = payload
 	}
 }
 

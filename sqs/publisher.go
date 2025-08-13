@@ -112,7 +112,7 @@ func (p *publisher) Publish(ctx context.Context, opts ...event.PublishOption) {
 		MessageBody: aws.String(string(body)),
 	}
 
-	if config.Sqs.UseFifo {
+	if p.useFIFO {
 		groupID := config.Sqs.GroupID
 		input.MessageGroupId = aws.String(groupID)
 	}
