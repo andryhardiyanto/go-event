@@ -85,10 +85,6 @@ func (qp *QueueProvisioner) EnsureMainAndDLQ(ctx context.Context, baseName strin
 	if qp.useFIFO && !strings.HasSuffix(mainName, ".fifo") {
 		mainName += ".fifo"
 	}
-	dlqName := mainName + "-dlq"
-	if qp.useFIFO && !strings.HasSuffix(dlqName, ".fifo") {
-		dlqName += ".fifo"
-	}
 
 	mainURL, mainARN, err = qp.EnsureQueue(ctx, mainName)
 	if err != nil {
@@ -98,6 +94,11 @@ func (qp *QueueProvisioner) EnsureMainAndDLQ(ctx context.Context, baseName strin
 	if !qp.useDlq {
 		_ = qp.clearRedrivePolicy(ctx, mainURL)
 		return mainURL, mainARN, "", "", nil
+	}
+
+	dlqName := strings.TrimSuffix(mainName, ".fifo") + "-dlq"
+	if qp.useFIFO {
+		dlqName += ".fifo"
 	}
 
 	dlqURL, dlqARN, err = qp.EnsureQueue(ctx, dlqName)
