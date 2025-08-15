@@ -268,27 +268,28 @@ func main() {
 
 ## ⚙️ Configuration Options
 
-### Event Options (Common)
+### Event Options
 
 ```go
 // Logger configuration
 event.WithLogger(logger)
 
-// Kafka Publisher Options
-event.WithKafkaPublisherBroker("localhost:9092")
-event.WithKafkaPublisherTimeout(10*time.Second)
-event.WithKafkaPublisherRetryMax(3)
-event.WithKafkaPublisherSuccesses(true)
-event.WithKafkaPublisherRequiredAcks(sarama.WaitForAll)
+// Kafka configuration
+event.WithKafkaClient(kafkaClient)
+event.WithKafkaPublisherTimeout(30 * time.Second)
+event.WithKafkaSubscriberTimeout(10 * time.Second)
+event.WithKafkaFIFO(true)
 
-// Kafka Subscriber Options
-event.WithKafkaSubscriberBrokers([]string{"localhost:9092"})
-event.WithKafkaSubscriberTimeout(30*time.Second)
-
-// SQS Options
+// SQS configuration
 event.WithSqsClient(sqsClient)
-event.WithSqsFIFO(true)
-event.WithSqsSubscriberTimeout(30*time.Second)
+event.WithSqsUseFifo(true)
+event.WithSqsUseDlq(true)                    // Enable Dead Letter Queue
+event.WithSqsMaxReceiveCount(3)              // Max retries before DLQ
+event.WithSqsUseRedrivePermission(true)      // Enable redrive permissions
+event.WithSqsQueueAttributeNameReceiveMessageWaitTimeSeconds(20)
+event.WithSqsQueueAttributeNameVisibilityTimeout(60)
+event.WithSqsSubscriberMaxNumberOfMessages(10)
+event.WithSqsSubscriberWaitTimeSeconds(20)
 ```
 
 ### Publish Options

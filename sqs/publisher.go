@@ -13,10 +13,10 @@ import (
 )
 
 type publisher struct {
-	client    *sqs.Client
-	logger    goLogger.Logger
-	queueURLs map[string]string // cache: topic → queueURL
-	useFIFO   bool
+	client           *sqs.Client
+	logger           goLogger.Logger
+	useFIFO          bool
+	queueProvisioner *QueueProvisioner
 }
 
 func NewPublisher(opts ...event.EventOption) event.Publisher {
@@ -32,56 +32,35 @@ func NewPublisher(opts ...event.EventOption) event.Publisher {
 	if cfg.Sqs.Client == nil {
 		panic("sqs client is nil")
 	}
-
 	if cfg.Logger == nil {
 		panic("logger is nil")
 	}
 
+	if cfg.Sqs.QueueAttributeNameReceiveMessageWaitTimeSeconds == 0 {
+		cfg.Sqs.QueueAttributeNameReceiveMessageWaitTimeSeconds = 20
+	}
+	if cfg.Sqs.QueueAttributeNameVisibilityTimeout == 0 {
+		cfg.Sqs.QueueAttributeNameVisibilityTimeout = 60
+	}
+	if cfg.Sqs.MaxReceiveCount == 0 {
+		cfg.Sqs.MaxReceiveCount = 1
+	}
+
 	return &publisher{
-		client:    cfg.Sqs.Client,
-		logger:    cfg.Logger,
-		queueURLs: make(map[string]string),
-		useFIFO:   cfg.Sqs.UseFIFO,
+		client:  cfg.Sqs.Client,
+		logger:  cfg.Logger,
+		useFIFO: cfg.Sqs.UseFIFO,
+		queueProvisioner: NewQueueProvisioner(
+			cfg.Sqs.Client,
+			cfg.Logger,
+			cfg.Sqs.UseFIFO,
+			cfg.Sqs.MaxReceiveCount,
+			cfg.Sqs.UseRedrivePermission,
+			cfg.Sqs.UseDlq,
+			cfg.Sqs.QueueAttributeNameReceiveMessageWaitTimeSeconds,
+			cfg.Sqs.QueueAttributeNameVisibilityTimeout,
+		),
 	}
-}
-
-func (p *publisher) getOrCreateQueueURL(ctx context.Context, topic event.Topic) (string, error) {
-	if url, ok := p.queueURLs[topic.String()]; ok {
-		return url, nil
-	}
-
-	queueName := string(topic)
-	if p.useFIFO && !strings.HasSuffix(queueName, ".fifo") {
-		queueName += ".fifo"
-	}
-
-	// Cek queue
-	getOut, err := p.client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
-		QueueName: aws.String(queueName),
-	})
-	if err == nil && getOut.QueueUrl != nil {
-		p.queueURLs[topic.String()] = *getOut.QueueUrl
-		return *getOut.QueueUrl, nil
-	}
-
-	// Buat queue kalau belum ada
-	createInput := &sqs.CreateQueueInput{
-		QueueName: aws.String(queueName),
-	}
-	if p.useFIFO {
-		createInput.Attributes = map[string]string{
-			"FifoQueue":                 "true",
-			"ContentBasedDeduplication": "true",
-		}
-	}
-
-	createOut, err := p.client.CreateQueue(ctx, createInput)
-	if err != nil {
-		return "", fmt.Errorf("failed to create queue: %w", err)
-	}
-
-	p.queueURLs[topic.String()] = *createOut.QueueUrl
-	return *createOut.QueueUrl, nil
 }
 
 func (p *publisher) Publish(ctx context.Context, opts ...event.PublishOption) {
@@ -101,7 +80,7 @@ func (p *publisher) Publish(ctx context.Context, opts ...event.PublishOption) {
 		return
 	}
 
-	queueURL, err := p.getOrCreateQueueURL(ctx, config.Topic)
+	queueURL, err := p.queueProvisioner.GetOrCreateQueueURL(ctx, config.Topic.String())
 	if err != nil {
 		p.logger.Error(ctx, err.Error())
 		return
@@ -113,12 +92,15 @@ func (p *publisher) Publish(ctx context.Context, opts ...event.PublishOption) {
 	}
 
 	if p.useFIFO {
-		groupID := config.Sqs.GroupID
+		groupID := strings.TrimSpace(config.Sqs.GroupID)
+		if groupID == "" {
+			p.logger.Error(ctx, "FIFO queue requires a non-empty MessageGroupId")
+			return
+		}
 		input.MessageGroupId = aws.String(groupID)
 	}
 
-	_, err = p.client.SendMessage(ctx, input)
-	if err != nil {
+	if _, err := p.client.SendMessage(ctx, input); err != nil {
 		p.logger.Error(ctx, fmt.Sprintf("failed to send message to %v: %v", queueURL, err))
 		return
 	}
@@ -126,6 +108,4 @@ func (p *publisher) Publish(ctx context.Context, opts ...event.PublishOption) {
 	p.logger.Info(ctx, fmt.Sprintf("successfully sent message to queue %s", queueURL))
 }
 
-func (p *publisher) Close() error {
-	return nil
-}
+func (p *publisher) Close() error { return nil }

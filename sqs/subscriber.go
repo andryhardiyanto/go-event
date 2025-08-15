@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -12,18 +12,19 @@ import (
 	goLogger "github.com/andryhardiyanto/go-logger"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	sqsTypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
 type subscriber struct {
-	client       *sqs.Client
-	timeout      time.Duration
-	logger       goLogger.Logger
-	handlers     map[string]event.SubscriberHandler
-	queues       map[string]string
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	useFIFOQueue bool
+	client              *sqs.Client
+	timeout             time.Duration
+	logger              goLogger.Logger
+	handlers            map[string]event.SubscriberHandler
+	cancel              context.CancelFunc
+	wg                  sync.WaitGroup
+	queueProvisioner    *QueueProvisioner
+	maxNumberOfMessages int
+	waitTimeSeconds     int
+	random              *rand.Rand
 }
 
 func NewSubscriber(opts ...event.EventOption) event.Subscriber {
@@ -48,53 +49,41 @@ func NewSubscriber(opts ...event.EventOption) event.Subscriber {
 		cfg.Sqs.Subscriber.Timeout = 5 * time.Second
 	}
 
+	if cfg.Sqs.QueueAttributeNameReceiveMessageWaitTimeSeconds == 0 {
+		cfg.Sqs.QueueAttributeNameReceiveMessageWaitTimeSeconds = 20
+	}
+	if cfg.Sqs.QueueAttributeNameVisibilityTimeout == 0 {
+		cfg.Sqs.QueueAttributeNameVisibilityTimeout = 60
+	}
+	if cfg.Sqs.MaxReceiveCount == 0 {
+		cfg.Sqs.MaxReceiveCount = 1
+	}
+	if cfg.Sqs.Subscriber.MaxNumberOfMessages == 0 {
+		cfg.Sqs.Subscriber.MaxNumberOfMessages = 1
+	}
+	if cfg.Sqs.Subscriber.WaitTimeSeconds == 0 {
+		cfg.Sqs.Subscriber.WaitTimeSeconds = 20
+	}
+
 	return &subscriber{
-		client:       cfg.Sqs.Client,
-		timeout:      cfg.Sqs.Subscriber.Timeout,
-		logger:       cfg.Logger,
-		handlers:     make(map[string]event.SubscriberHandler),
-		queues:       make(map[string]string),
-		useFIFOQueue: cfg.Sqs.UseFIFO,
+		client:              cfg.Sqs.Client,
+		timeout:             cfg.Sqs.Subscriber.Timeout,
+		logger:              cfg.Logger,
+		handlers:            make(map[string]event.SubscriberHandler),
+		maxNumberOfMessages: cfg.Sqs.Subscriber.MaxNumberOfMessages,
+		waitTimeSeconds:     cfg.Sqs.Subscriber.WaitTimeSeconds,
+		queueProvisioner: NewQueueProvisioner(
+			cfg.Sqs.Client,
+			cfg.Logger,
+			cfg.Sqs.UseFIFO,
+			cfg.Sqs.MaxReceiveCount,
+			cfg.Sqs.UseRedrivePermission,
+			cfg.Sqs.UseDlq,
+			cfg.Sqs.QueueAttributeNameReceiveMessageWaitTimeSeconds,
+			cfg.Sqs.QueueAttributeNameVisibilityTimeout,
+		),
+		random: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-}
-
-// getOrCreateQueueURL memastikan semua instance pakai queue yang sama
-func (s *subscriber) getOrCreateQueueURL(ctx context.Context, topic string) (string, error) {
-	queueName := topic
-	if s.useFIFOQueue && !strings.HasSuffix(queueName, ".fifo") {
-		queueName += ".fifo"
-	}
-
-	// Cek apakah queue sudah ada
-	getQueueOut, err := s.client.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{
-		QueueName: aws.String(queueName),
-	})
-	if err == nil && getQueueOut.QueueUrl != nil {
-		return *getQueueOut.QueueUrl, nil
-	}
-
-	var notFound *sqsTypes.QueueDoesNotExist
-	if errors.As(err, &notFound) {
-		// Buat queue baru
-		createInput := &sqs.CreateQueueInput{
-			QueueName: aws.String(queueName),
-			Attributes: map[string]string{
-				"VisibilityTimeout": fmt.Sprintf("%d", int(s.timeout.Seconds())),
-			},
-		}
-		if s.useFIFOQueue {
-			createInput.Attributes["FifoQueue"] = "true"
-			createInput.Attributes["ContentBasedDeduplication"] = "true"
-		}
-
-		createOut, createErr := s.client.CreateQueue(ctx, createInput)
-		if createErr != nil {
-			return "", fmt.Errorf("failed to create queue: %w", createErr)
-		}
-		return *createOut.QueueUrl, nil
-	}
-
-	return "", fmt.Errorf("failed to get queue url: %w", err)
 }
 
 func (s *subscriber) Subscribe(opts ...event.SubscribeOption) {
@@ -118,14 +107,23 @@ func (s *subscriber) Subscribe(opts ...event.SubscribeOption) {
 	}
 	s.handlers[topicStr] = cfg.Handler
 
-	queueURL, err := s.getOrCreateQueueURL(context.Background(), topicStr)
+	_, err := s.queueProvisioner.GetOrCreateQueueURL(context.Background(), topicStr)
 	if err != nil {
 		s.logger.Panic(context.Background(), err.Error())
 	}
 
-	s.queues[topicStr] = queueURL
 }
+func (s *subscriber) backoffFullJitter(attempt int, base, capDelay time.Duration) time.Duration {
+	d := base << attempt
+	if d > capDelay {
+		d = capDelay
+	}
+	if d <= 0 {
+		return 0
+	}
 
+	return time.Duration(s.random.Int63n(int64(d)))
+}
 func (s *subscriber) Start(parent context.Context) error {
 	if len(s.handlers) == 0 {
 		return fmt.Errorf("no subscriptions registered")
@@ -135,10 +133,15 @@ func (s *subscriber) Start(parent context.Context) error {
 	s.cancel = cancel
 
 	for topic, handler := range s.handlers {
-		queueURL := s.queues[topic]
+		queueURL, err := s.queueProvisioner.GetOrCreateQueueURL(ctx, topic)
+		if err != nil {
+			return err
+		}
+
 		s.wg.Add(1)
 		go func(topic, queueURL string, handler event.SubscriberHandler) {
 			defer s.wg.Done()
+			errStreak := 0
 
 			for {
 				select {
@@ -147,36 +150,42 @@ func (s *subscriber) Start(parent context.Context) error {
 				default:
 					output, err := s.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 						QueueUrl:            aws.String(queueURL),
-						MaxNumberOfMessages: 10,
-						WaitTimeSeconds:     10,
-						// Tidak perlu set VisibilityTimeout lagi, pakai default dari queue
+						MaxNumberOfMessages: int32(s.maxNumberOfMessages),
+						WaitTimeSeconds:     int32(s.waitTimeSeconds),
 					})
 					if err != nil {
 						if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-							s.logger.Info(ctx, fmt.Sprintf("stopping consumer for topic %s: context cancelled", topic))
+							s.logger.Warn(ctx, fmt.Sprintf("stopping consumer for topic %s: context cancelled", topic))
 							return
 						}
 						s.logger.Error(ctx, fmt.Sprintf("receive error on topic %s: %v", topic, err))
-						time.Sleep(5 * time.Second) // retry sederhana
+						waitTime := s.backoffFullJitter(errStreak, 500*time.Millisecond, 10*time.Second)
+						errStreak++
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(waitTime):
+						}
 						continue
 					}
+					errStreak = 0
 
 					for _, msg := range output.Messages {
 						if ctx.Err() != nil {
-							s.logger.Info(ctx, fmt.Sprintf("stopping message processing for topic %s: context cancelled", topic))
+							s.logger.Warn(ctx, fmt.Sprintf("stopping message processing for topic %s: context cancelled", topic))
 							return
 						}
 
 						s.logger.Info(ctx, fmt.Sprintf("received message topic=%s messageID=%s", topic, aws.ToString(msg.MessageId)))
 
-						processCtx, cancel := context.WithTimeout(ctx, s.timeout)
+						processCtx, msgCancel := context.WithTimeout(ctx, s.timeout)
 						err := handler(processCtx, msg)
-						cancel()
+						msgCancel()
 
 						if err != nil {
 							if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-								s.logger.Info(ctx, fmt.Sprintf("message processing cancelled for topic %s: %v", topic, err))
-								return
+								s.logger.Warn(ctx, fmt.Sprintf("message processing cancelled for topic %s: %v", topic, err))
+								continue
 							}
 							s.logger.Error(ctx, fmt.Sprintf("error handling message on topic %s: %v", topic, err))
 							continue
@@ -188,7 +197,7 @@ func (s *subscriber) Start(parent context.Context) error {
 						})
 						if err != nil {
 							if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-								s.logger.Info(ctx, fmt.Sprintf("stopping message deletion for topic %s: context cancelled", topic))
+								s.logger.Warn(ctx, fmt.Sprintf("stopping message deletion for topic %s: context cancelled", topic))
 								return
 							}
 							s.logger.Error(ctx, fmt.Sprintf("delete error topic=%s: %v", topic, err))

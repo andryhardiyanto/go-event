@@ -81,14 +81,21 @@ type Kafka struct {
 	Subscriber SubscriberConfigKafka
 }
 type Sqs struct {
-	Client     *sqs.Client
-	UseFIFO    bool
-	Publisher  PublisherConfigSqs
-	Subscriber SubscriberConfigSqs
+	Client                                          *sqs.Client
+	UseFIFO                                         bool
+	MaxReceiveCount                                 int
+	UseRedrivePermission                            bool
+	UseDlq                                          bool
+	QueueAttributeNameReceiveMessageWaitTimeSeconds int
+	QueueAttributeNameVisibilityTimeout             int
+	Publisher                                       PublisherConfigSqs
+	Subscriber                                      SubscriberConfigSqs
 }
 
 type SubscriberConfigSqs struct {
-	Timeout time.Duration
+	Timeout             time.Duration
+	MaxNumberOfMessages int
+	WaitTimeSeconds     int
 }
 
 type PublisherConfigSqs struct {
@@ -213,5 +220,47 @@ func WithSqsSubscriber(s SubscriberConfigSqs) EventOption {
 func WithSqsSubscriberTimeout(timeout time.Duration) EventOption {
 	return func(cfg *EventConfig) {
 		cfg.Sqs.Subscriber.Timeout = timeout
+	}
+}
+
+func WithSqsMaxReceiveCount(maxReceiveCount int) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Sqs.MaxReceiveCount = maxReceiveCount
+	}
+}
+
+func WithSqsUseRedrivePermission(useRedrivePermission bool) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Sqs.UseRedrivePermission = useRedrivePermission
+	}
+}
+
+func WithSqsUseDlq(useDlq bool) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Sqs.UseDlq = useDlq
+	}
+}
+
+func WithSqsQueueAttributeNameReceiveMessageWaitTimeSeconds(queueAttributeNameReceiveMessageWaitTimeSeconds int) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Sqs.QueueAttributeNameReceiveMessageWaitTimeSeconds = queueAttributeNameReceiveMessageWaitTimeSeconds
+	}
+}
+
+func WithSqsQueueAttributeNameVisibilityTimeout(queueAttributeNameVisibilityTimeout int) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Sqs.QueueAttributeNameVisibilityTimeout = queueAttributeNameVisibilityTimeout
+	}
+}
+
+func WithSqsSubscriberMaxNumberOfMessages(maxNumberOfMessages int) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Sqs.Subscriber.MaxNumberOfMessages = maxNumberOfMessages
+	}
+}
+
+func WithSqsSubscriberWaitTimeSeconds(waitTimeSeconds int) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Sqs.Subscriber.WaitTimeSeconds = waitTimeSeconds
 	}
 }
