@@ -131,11 +131,31 @@ func (qp *QueueProvisioner) ensureRedrivePolicy(ctx context.Context, mainURL, dl
 	}
 	need := true
 	if rp := cur.Attributes[string(types.QueueAttributeNameRedrivePolicy)]; rp != "" {
-		var curM map[string]string
+		var curM map[string]any
 		if err := json.Unmarshal([]byte(rp), &curM); err != nil {
 			return fmt.Errorf("unmarshal redrive policy: %w", err)
 		}
-		if curM["deadLetterTargetArn"] == dlqARN && curM["maxReceiveCount"] == fmtInt(mrc) {
+
+		maxReceiveCountStr := ""
+		if mrcVal, ok := curM["maxReceiveCount"]; ok {
+			switch v := mrcVal.(type) {
+			case float64:
+				maxReceiveCountStr = fmt.Sprintf("%.0f", v)
+			case string:
+				maxReceiveCountStr = v
+			case int:
+				maxReceiveCountStr = fmt.Sprintf("%d", v)
+			}
+		}
+
+		deadLetterTargetArn := ""
+		if dlqVal, ok := curM["deadLetterTargetArn"]; ok {
+			if dlqStr, ok := dlqVal.(string); ok {
+				deadLetterTargetArn = dlqStr
+			}
+		}
+
+		if deadLetterTargetArn == dlqARN && maxReceiveCountStr == fmtInt(mrc) {
 			need = false
 		}
 	}
