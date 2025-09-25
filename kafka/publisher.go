@@ -53,9 +53,20 @@ func NewPublisher(opts ...event.EventOption) (event.Publisher, error) {
 	if retryMax == 0 {
 		retryMax = 2
 	}
+
 	successes := cfg.Kafka.Publisher.Successes
 	if successes {
 		successes = true
+	}
+
+	maxOpenRequests := cfg.Kafka.Publisher.MaxOpenRequests
+	if maxOpenRequests == 0 {
+		maxOpenRequests = 1
+	}
+
+	kafkaVersion := sarama.V3_6_1_0
+	if cfg.Kafka.Version != nil {
+		kafkaVersion = *cfg.Kafka.Version
 	}
 
 	config := sarama.NewConfig()
@@ -63,6 +74,9 @@ func NewPublisher(opts ...event.EventOption) (event.Publisher, error) {
 	config.Producer.Retry.Max = retryMax
 	config.Producer.Return.Successes = successes
 	config.Producer.Timeout = timeout
+	config.Producer.Idempotent = cfg.Kafka.Publisher.Idempotent
+	config.Net.MaxOpenRequests = maxOpenRequests
+	config.Version = kafkaVersion
 
 	producer, err := sarama.NewSyncProducer([]string{broker}, config)
 	if err != nil {
@@ -98,8 +112,17 @@ func (p *publisher) Publish(ctx context.Context, opts ...event.PublishOption) {
 	}
 
 	saramaMsg := &sarama.ProducerMessage{
-		Topic: topic,
-		Value: sarama.ByteEncoder(bytes),
+		Topic:     topic,
+		Value:     sarama.ByteEncoder(bytes),
+		Timestamp: time.Now().UTC(),
+	}
+
+	if config.MessageKey != "" {
+		saramaMsg.Key = sarama.StringEncoder(config.MessageKey)
+	}
+
+	if len(config.Headers) > 0 {
+		saramaMsg.Headers = config.Headers
 	}
 
 	partition, offset, err := p.producer.SendMessage(saramaMsg)

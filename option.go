@@ -12,15 +12,28 @@ import (
 type PublishOption func(*PublishConfig)
 
 type PublishConfig struct {
-	Topic   Topic
-	Payload any
-	Sqs     PublishConfigSqs
+	Topic      Topic
+	Payload    any
+	Sqs        PublishConfigSqs
+	MessageKey string
+	Headers    []sarama.RecordHeader
 }
 
 type PublishConfigSqs struct {
 	GroupID string
 }
 
+func WithPublishHeaders(headers []sarama.RecordHeader) PublishOption {
+	return func(c *PublishConfig) {
+		c.Headers = headers
+	}
+}
+
+func WithPublishKey(msgKey string) PublishOption {
+	return func(c *PublishConfig) {
+		c.MessageKey = msgKey
+	}
+}
 func WithPublishTopic(topic Topic) PublishOption {
 	return func(c *PublishConfig) {
 		c.Topic = topic
@@ -48,7 +61,14 @@ type SubscribeOptionConfig struct {
 }
 
 type SubscribeOptionConfigKafka struct {
-	GroupID Group
+	GroupID           Group
+	RebalanceStrategy sarama.BalanceStrategy
+}
+
+func WithSubscribeOptionRebalanceStrategyKafka(strategy sarama.BalanceStrategy) SubscribeOption {
+	return func(c *SubscribeOptionConfig) {
+		c.Kafka.RebalanceStrategy = strategy
+	}
 }
 
 func WithSubscribeOptionGroupIDKafka(groupID Group) SubscribeOption {
@@ -79,6 +99,7 @@ type EventConfig struct {
 type Kafka struct {
 	Publisher  PublisherConfigKafka
 	Subscriber SubscriberConfigKafka
+	Version    *sarama.KafkaVersion
 }
 type Sqs struct {
 	Client                                          *sqs.Client
@@ -108,11 +129,31 @@ type SubscriberConfigKafka struct {
 }
 
 type PublisherConfigKafka struct {
-	Broker       string
-	Timeout      time.Duration // default 5s
-	Successes    bool
-	RetryMax     int
-	RequiredAcks sarama.RequiredAcks
+	Broker          string
+	Timeout         time.Duration // default 5s
+	Successes       bool
+	RetryMax        int
+	RequiredAcks    sarama.RequiredAcks
+	Idempotent      bool
+	MaxOpenRequests int
+}
+
+func WithKafkaVersion(version sarama.KafkaVersion) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Kafka.Version = &version
+	}
+}
+
+func WithKafkaPublisherIdempotent(idempotent bool) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Kafka.Publisher.Idempotent = idempotent
+	}
+}
+
+func WithKafkaPublisherMaxOpenRequests(maxOpenRequests int) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Kafka.Publisher.MaxOpenRequests = maxOpenRequests
+	}
 }
 
 func WithLogger(logger goLogger.Logger) EventOption {

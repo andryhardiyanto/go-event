@@ -13,19 +13,21 @@ import (
 )
 
 type subscriber struct {
-	configs []config
-	count   map[string]map[string]int
-	broker  []string
-	timeout time.Duration
-	logger  goLogger.Logger
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	configs      []config
+	count        map[string]map[string]int
+	broker       []string
+	timeout      time.Duration
+	logger       goLogger.Logger
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	KafkaVersion *sarama.KafkaVersion
 }
 
 type config struct {
-	topic   event.Topic
-	groupID event.Group
-	handler event.SubscriberHandler
+	topic             event.Topic
+	groupID           event.Group
+	handler           event.SubscriberHandler
+	RebalanceStrategy sarama.BalanceStrategy
 }
 
 func NewSubscriber(opts ...event.EventOption) event.Subscriber {
@@ -51,10 +53,11 @@ func NewSubscriber(opts ...event.EventOption) event.Subscriber {
 	}
 
 	return &subscriber{
-		broker:  cfg.Kafka.Subscriber.Brokers,
-		timeout: cfg.Kafka.Subscriber.Timeout,
-		count:   make(map[string]map[string]int),
-		logger:  cfg.Logger,
+		broker:       cfg.Kafka.Subscriber.Brokers,
+		timeout:      cfg.Kafka.Subscriber.Timeout,
+		count:        make(map[string]map[string]int),
+		logger:       cfg.Logger,
+		KafkaVersion: cfg.Kafka.Version,
 	}
 }
 
@@ -91,9 +94,10 @@ func (s *subscriber) Subscribe(opts ...event.SubscribeOption) {
 	}
 
 	s.configs = append(s.configs, config{
-		topic:   cfg.Topic,
-		groupID: cfg.Kafka.GroupID,
-		handler: cfg.Handler,
+		topic:             cfg.Topic,
+		groupID:           cfg.Kafka.GroupID,
+		handler:           cfg.Handler,
+		RebalanceStrategy: cfg.Kafka.RebalanceStrategy,
 	})
 
 	topics[cfg.Kafka.GroupID.String()]++
@@ -115,9 +119,17 @@ func (s *subscriber) Start(parent context.Context) error {
 			defer s.wg.Done()
 
 			sarCfg := sarama.NewConfig()
-			sarCfg.Version = sarama.V2_8_0_0
+			if s.KafkaVersion != nil {
+				sarCfg.Version = *s.KafkaVersion
+			} else {
+				sarCfg.Version = sarama.V3_6_1_0
+			}
+			if cfg.RebalanceStrategy != nil {
+				sarCfg.Consumer.Group.Rebalance.Strategy = cfg.RebalanceStrategy
+			} else {
+				sarCfg.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategySticky()
+			}
 			sarCfg.Consumer.Offsets.Initial = sarama.OffsetOldest
-			sarCfg.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategyRange()
 
 			cg, err := sarama.NewConsumerGroup(s.broker, cfg.groupID.String(), sarCfg)
 			if err != nil {
@@ -177,21 +189,29 @@ func (h *consumerGroupHandler) Setup(_ sarama.ConsumerGroupSession) error   { re
 func (h *consumerGroupHandler) Cleanup(_ sarama.ConsumerGroupSession) error { return nil }
 
 func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	for msg := range claim.Messages() {
-		h.logger.Info(context.Background(), fmt.Sprintf(
-			"received message topic=%s groupID=%s partition=%d offset=%d key=%s",
-			h.topic, h.groupID, msg.Partition, msg.Offset, string(msg.Key),
-		))
+	for {
+		select {
+		case <-session.Context().Done():
+			return nil
+		case msg, ok := <-claim.Messages():
+			if !ok {
+				return nil
+			}
 
-		ctx, cancel := context.WithTimeout(context.Background(), h.timeout)
-		err := h.handler(ctx, msg)
-		cancel()
+			h.logger.Info(session.Context(), fmt.Sprintf(
+				"received message topic=%s groupID=%s partition=%d offset=%d key=%s",
+				h.topic, h.groupID, msg.Partition, msg.Offset, string(msg.Key),
+			))
 
-		if err != nil {
-			h.logger.Error(context.Background(), fmt.Sprintf("error processing message: %v", err))
-		} else {
-			session.MarkMessage(msg, "")
+			ctx, cancel := context.WithTimeout(session.Context(), h.timeout)
+			err := h.handler(ctx, msg)
+			cancel()
+
+			if err != nil {
+				h.logger.Error(session.Context(), fmt.Sprintf("error processing message: %v", err))
+			} else {
+				session.MarkMessage(msg, "")
+			}
 		}
 	}
-	return nil
 }
