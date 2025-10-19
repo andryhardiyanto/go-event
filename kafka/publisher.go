@@ -77,6 +77,7 @@ func NewPublisher(opts ...event.EventOption) (event.Publisher, error) {
 	config.Producer.Idempotent = cfg.Kafka.Publisher.Idempotent
 	config.Net.MaxOpenRequests = maxOpenRequests
 	config.Version = kafkaVersion
+	config.Producer.Partitioner = cfg.Kafka.Publisher.Partitioner
 
 	producer, err := sarama.NewSyncProducer([]string{broker}, config)
 	if err != nil {

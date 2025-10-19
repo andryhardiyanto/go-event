@@ -136,6 +136,8 @@ type PublisherConfigKafka struct {
 	RequiredAcks    sarama.RequiredAcks
 	Idempotent      bool
 	MaxOpenRequests int
+	Partitioner     sarama.PartitionerConstructor
+	NumPartitions   int
 }
 
 func WithKafkaVersion(version sarama.KafkaVersion) EventOption {
@@ -166,6 +168,12 @@ func WithLogger(logger goLogger.Logger) EventOption {
 func WithKafkaPublisher(p PublisherConfigKafka) EventOption {
 	return func(cfg *EventConfig) {
 		cfg.Kafka.Publisher = p
+	}
+}
+
+func WithKafkaPublisherPartitioner(partitioner sarama.PartitionerConstructor) EventOption {
+	return func(cfg *EventConfig) {
+		cfg.Kafka.Publisher.Partitioner = partitioner
 	}
 }
 
